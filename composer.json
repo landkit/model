@@ -1,0 +1,23 @@
+{
+    "name": "landkit/php-model",
+    "type": "library",
+    "license": "proprietary",
+    "minimum-stability": "stable",
+    "homepage": "https://github.com/landkit/php-model",
+    "authors": [
+        {
+            "name": "Land Kit",
+            "email": "landkit.packages@gmail.com",
+            "homepage": "https://github.com/landkit"
+        }
+    ],
+    "autoload": {
+        "psr-4": {
+            "LandKit\\Model\\": "src/"
+        }
+    },
+    "require": {
+        "php": "^7.0|^8.0",
+        "ext-pdo": "*"
+    }
+}
