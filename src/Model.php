@@ -380,17 +380,20 @@ class Model
 
     /**
      * @param string $terms
-     * @param array $params
      * @return int|null
      */
-    public function rowCount(string $terms = '', array $params = [])
+    public function rowCount(string $terms = '')
     {
         try {
             $this->select('COUNT(*)');
 
             $query = str_replace('{this.table}', $this->table, $this->statement);
 
-            $statement = Connect::instance($this->database)->query($query . $terms);
+            if ($terms) {
+                $query .= ' WHERE ' . $terms;
+            }
+
+            $statement = Connect::instance($this->database)->query($query);
             $count = $statement->fetchColumn();
 
             $this->statement = '';
