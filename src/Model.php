@@ -2,13 +2,14 @@
 
 namespace LandKit\Model;
 
-use DateTime;
 use PDO;
 use PDOException;
 use stdClass;
 
 class Model
 {
+    use CrudTrait;
+
     /**
      * @var string
      */
@@ -25,14 +26,9 @@ class Model
     protected $primaryKey = 'id';
 
     /**
-     * @var array
+     * @var array|null
      */
-    protected $required = [];
-
-    /**
-     * @var array
-     */
-    protected $uniqueColumns = [];
+    protected $required = null;
 
     /**
      * @var bool
@@ -40,27 +36,22 @@ class Model
     protected $timestamps = true;
 
     /**
-     * @var string
+     * @var string|null
      */
-    private $behaviorToSave;
+    private $statement = null;
 
     /**
-     * @var string
+     * @var array|string|null
      */
-    private $statement;
+    private $params = null;
 
     /**
-     * @var array
+     * @var array|null
      */
-    private $params;
+    private $functions = null;
 
     /**
-     * @var array
-     */
-    private $functions;
-
-    /**
-     * @var stdClass|null
+     * @var object|null
      */
     private $data = null;
 
@@ -68,6 +59,11 @@ class Model
      * @var PDOException|null
      */
     private $fail = null;
+
+    /**
+     * @var string
+     */
+    private $behaviorToSave;
 
     /**
      * @const string
@@ -80,21 +76,18 @@ class Model
     const UPDATED_AT = 'updated_at';
 
     /**
-     * Create new Model instance.
+     * Model constructor.
      *
      * @param string $behaviorToSave
      */
     public function __construct(string $behaviorToSave = 'create')
     {
         $this->behaviorToSave = $behaviorToSave;
-        $this->statement = '';
-        $this->params = [];
-        $this->functions = [];
     }
 
     /**
      * @param string $name
-     * @return float|int|string|null
+     * @return mixed
      */
     public function __get(string $name)
     {
@@ -125,26 +118,18 @@ class Model
     }
 
     /**
-     * @param string $name
-     * @return void
+     * @param int $mode
+     * @return array|null
      */
-    public function __unset(string $name)
+    public function columns(int $mode = PDO::FETCH_OBJ)
     {
-        if (isset($this->data->$name)) {
-            unset($this->data->$name);
-        }
+        $statement = Connect::instance($this->database)->prepare("DESCRIBE {$this->table}");
+        $statement->execute($this->params);
+        return $statement->fetchAll($mode);
     }
 
     /**
-     * @return bool
-     */
-    public function isUpdate(): bool
-    {
-        return $this->behaviorToSave == 'update';
-    }
-
-    /**
-     * @return stdClass|null
+     * @return object|null
      */
     public function data()
     {
@@ -186,12 +171,13 @@ class Model
      * @param string $type
      * @return Model
      */
-    public function join(
-        string $table,
-        string $terms,
-        string $type = 'INNER'
-    ): Model {
-        $this->statement .= " {$type} JOIN {$table} on {$terms}";
+    public function join(string $table, string $terms, string $type = 'INNER'): Model
+    {
+        if (!$this->statement) {
+            $this->select('*');
+        }
+
+        $this->statement .= "{$type} JOIN {$table} ON {$terms}";
         return $this;
     }
 
@@ -200,7 +186,7 @@ class Model
      * @param string $terms
      * @return Model
      */
-    public function leftJoin(string $table, string $terms): Model
+    public function letJoin(string $table, string $terms): Model
     {
         return $this->join($table, $terms, 'LEFT');
     }
@@ -222,26 +208,27 @@ class Model
      */
     public function fullJoin(string $table, string $terms): Model
     {
-        return $this->join($table, $terms, 'FULL OUTER');
+        return $this->join($table, $terms, 'FULL');
     }
 
     /**
      * @param string $terms
-     * @param array $params
+     * @param array|string|null $params
      * @return Model
      */
-    public function where(string $terms, array $params = []): Model
+    public function where(string $terms, $params = null): Model
     {
         if (!$this->statement) {
             $this->select('*');
         }
 
-        $this->statement .= " WHERE {$terms}";
-
-        if ($params) {
+        if (is_string($params)) {
+            parse_str($params, $this->params);
+        } else {
             $this->params = $params;
         }
 
+        $this->statement .= " WHERE {$terms}";
         return $this;
     }
 
@@ -288,121 +275,115 @@ class Model
     /**
      * @param int|string $value
      * @param string $columns
-     * @return $this|mixed
-     */
-    public function findById($value, string $columns = '*')
-    {
-        if (!$this->statement) {
-            $this->select($columns);
-        }
-
-        return $this->where('id = :id', ['id' => $value])->fetch();
-    }
-
-    /**
-     * @param float|int|string $value
-     * @param string $columns
-     * @return $this|mixed
+     * @return $this|null
      */
     public function findByPrimaryKey($value, string $columns = '*')
     {
-        if (!$this->statement) {
-            $this->select($columns);
-        }
+        return $this
+            ->select($columns)
+            ->where("`{$this->primaryKey}` = :{$this->primaryKey}", [$this->primaryKey => $value])
+            ->fetch();
+    }
 
-        return $this->where("{$this->primaryKey} = :{$this->primaryKey}", [$this->primaryKey => $value])->fetch();
+    /**
+     * @param int|string $value
+     * @param string $columns
+     * @return $this|null
+     */
+    public function findById($value, string $columns = '*')
+    {
+        return $this->select($columns)->where('id = :id', ['id' => $value])->fetch();
     }
 
     /**
      * @param bool $all
-     * @return $this|mixed
+     * @return array|$this|null
      */
     public function fetch(bool $all = false)
     {
         try {
-            $query = str_replace('{this.table}', $this->table, $this->statement);
+            $connect = Connect::instance($this->database);
 
-            $statement = Connect::instance($this->database)->prepare($query);
+            if (!$connect) {
+                throw new PDOException(
+                    Connect::fail()->getMessage(),
+                    Connect::fail()->getCode(),
+                    Connect::fail()->getPrevious()
+                );
+            }
+
+            $query = strstr($this->statement, '{this.table}')
+                ? str_replace('{this.table}', $this->table, $this->statement)
+                : $this->statement;
+
+            $statement = $connect->prepare($query);
             $statement->execute($this->params);
 
-            $this->statement = '';
-            $this->params = [];
+            $this->statement = null;
+            $this->params = null;
 
             if (!$statement->rowCount()) {
                 return null;
             }
 
             if ($all) {
-                return strpos($query, ' JOIN ') !== false ?
-                    $statement->fetchAll() :
-                    $statement->fetchAll(PDO::FETCH_CLASS, static::class, ['behaviorToSave' => 'update']);
+                return strstr($query, 'JOIN')
+                    ? $statement->fetchAll()
+                    : $statement->fetchAll(PDO::FETCH_CLASS, static::class, ['behaviorToSave' => 'update']);
             }
 
-            return strpos($query, ' JOIN ') !== false ?
-                $statement->fetchObject() :
-                $statement->fetchObject(static::class, ['behaviorToSave' => 'update']);
+            return strstr($query, 'JOIN')
+                ? $statement->fetchObject()
+                : $statement->fetchObject(static::class, ['behaviorToSave' => 'update']);
         } catch (PDOException $e) {
             $this->fail = $e;
-            return null;
         }
+
+        return null;
     }
 
     /**
-     * @return array
+     * @param string|null $terms
+     * @param array|string|null $params
+     * @return int
      */
-    public function checkUniqueColumns(): array
-    {
-        $primaryKey = $this->primaryKey;
-        $columns = [];
-        $terms = '';
-        $params = [];
-
-        if ($this->behaviorToSave == 'update') {
-            $terms = " AND {$primaryKey} != :{$primaryKey}";
-            $params = [$primaryKey => $this->data->$primaryKey];
-        }
-
-        foreach ($this->uniqueColumns as $column) {
-            if (isset($this->data->$column)) {
-                $exists = $this->select($primaryKey)->where(
-                    "{$column} = :{$column}{$terms}",
-                    array_merge([$column => $this->data->$column], $params)
-                )->fetch();
-
-                if ($exists) {
-                    $columns[] = $column;
-                }
-            }
-        }
-
-        return $columns;
-    }
-
-    /**
-     * @param string $terms
-     * @return int|null
-     */
-    public function rowCount(string $terms = '')
+    public function rowCount(string $terms = null, $params = null): int
     {
         try {
+            $connect = Connect::instance($this->database);
+
+            if (!$connect) {
+                throw new PDOException(
+                    Connect::fail()->getMessage(),
+                    Connect::fail()->getCode(),
+                    Connect::fail()->getPrevious()
+                );
+            }
+
             $this->select('COUNT(*)');
 
             $query = str_replace('{this.table}', $this->table, $this->statement);
 
             if ($terms) {
-                $query .= ' WHERE ' . $terms;
+                $query .= " WHERE {$terms}";
             }
 
-            $statement = Connect::instance($this->database)->query($query);
-            $count = $statement->fetchColumn();
+            if ($params && is_string($params)) {
+                parse_str($params, $this->params);
+            }
 
-            $this->statement = '';
+            $statement = $connect->prepare($query);
+            $count = $statement->execute($this->params);
 
-            return $count ?: 0;
+            $this->statement = null;
+            $this->params = null;
+
+            return $count;
         } catch (PDOException $e) {
             $this->fail = $e;
-            return null;
         }
+
+        return 0;
     }
 
     /**
@@ -412,39 +393,45 @@ class Model
     {
         try {
             if ($this->required()) {
-                throw new PDOException('Fill in the required fields.');
+                throw new PDOException('Fill in the required fields.', 400);
             }
 
-            if ($this->behaviorToSave == 'create') {
-                $primaryKeyValue = $this->create((array) $this->data);
-            } elseif ($this->behaviorToSave == 'update') {
+            if ($this->isUpdate()) {
                 if (!$this->primaryKey) {
-                    throw new PDOException('Error updating! Check the data.');
+                    throw new PDOException('Error updating: primary key not defined.', 500);
                 }
 
                 $primaryKey = $this->primaryKey;
                 $primaryKeyValue = $this->data->$primaryKey;
 
-                $data = (array) $this->data;
-                unset($data[$primaryKey]);
+                if (!$primaryKeyValue) {
+                    throw new PDOException('Error updating: primary key value not defined.', 500);
+                }
 
-                $this->update($data, "{$primaryKey} = :{$primaryKey}", [$primaryKey => $primaryKeyValue]);
+                $save = $this->update(
+                    $this->safe(),
+                    "`{$primaryKey}` = :{$primaryKey}",
+                    [$primaryKey => $primaryKeyValue]
+                );
+            } elseif ($this->isCreate()) {
+                $primaryKeyValue = $this->create($this->safe());
+                $save = $primaryKeyValue;
             } else {
-                throw new PDOException('System error! If this warning persists, contact us.');
+                throw new PDOException('System error: If this warning persists, contact us.', 500);
             }
 
-            if (!$primaryKeyValue) {
+            if (is_null($save)) {
                 return false;
             }
 
-            $this->behaviorToSave = 'update';
             $this->data = $this->findByPrimaryKey($primaryKeyValue)->data();
 
             return true;
         } catch (PDOException $e) {
             $this->fail = $e;
-            return false;
         }
+
+        return false;
     }
 
     /**
@@ -458,177 +445,48 @@ class Model
             return false;
         }
 
-        return $this->delete("{$primaryKey} = :{$primaryKey}", [$primaryKey => $this->data->$primaryKey]);
-    }
-
-    /**
-     * @param array $data
-     * @return string
-     */
-    protected function create(array $data): string
-    {
-        try {
-            if (!$data) {
-                throw new PDOException('Error registering! Check the data.');
-            }
-
-            if ($this->timestamps && static::CREATED_AT) {
-                $data[static::CREATED_AT] = (new DateTime('now'))->format('Y-m-d H:i:s');
-            }
-
-            $columns = '';
-            $values = '';
-
-            if ($this->functions) {
-                foreach ($this->functions as $column => $value) {
-                    unset($data[$column]);
-
-                    $columns .= "{$column}, ";
-                    $values .= "{$value}, ";
-                }
-            }
-
-            if ($data) {
-                $values .= ':';
-
-                foreach ($data as $column => $value) {
-                    $columns .= "{$column}, ";
-                    $values .= "{$column}, :";
-                }
-
-                $values = substr($values, 0, -3);
-            } else {
-                $values = substr($values, 0, -2);
-            }
-
-            $columns = substr($columns, 0, -2);
-            $query = "INSERT INTO {$this->table} ({$columns}) VALUES ({$values})";
-
-            $connect = Connect::instance($this->database);
-
-            $statement = $connect->prepare($query);
-            $statement->execute($this->filter($data));
-
-            $primaryKey = $this->primaryKey;
-
-            if (defined('CONF_DATABASE') && CONF_DATABASE[$this->database]['driver'] == 'mysql') {
-                $lastInsertId = $connect->lastInsertId();
-            } else {
-                $lastInsertId = null;
-            }
-
-            return $lastInsertId ?: $this->data->$primaryKey;
-        } catch (PDOException $e) {
-            $this->fail = $e;
-            return '';
-        }
-    }
-
-    /**
-     * @param array $data
-     * @param string $terms
-     * @param array $params
-     * @return void
-     */
-    protected function update(array $data, string $terms, array $params)
-    {
-        try {
-            if (!$data) {
-                throw new PDOException('Error updating! Check the data.');
-            }
-
-            if ($this->timestamps && static::UPDATED_AT) {
-                $data[static::UPDATED_AT] = (new DateTime('now'))->format('Y-m-d H:i:s');
-            }
-
-            $dataSet = [];
-
-            if ($this->functions) {
-                foreach ($this->functions as $column => $value) {
-                    $dataSet[] = "{$column} = {$value}";
-                    unset($data[$column]);
-                }
-            }
-
-            foreach ($data as $bind => $value) {
-                $dataSet[] = "{$bind} = :{$bind}";
-            }
-
-            $values = implode(', ', $dataSet);
-
-            $query = "UPDATE {$this->table} SET {$values} WHERE {$terms}";
-
-            $statement = Connect::instance($this->database)->prepare($query);
-            $statement->execute($this->filter(array_merge($data, $params)));
-        } catch (PDOException $e) {
-            $this->fail = $e;
-        }
-    }
-
-    /**
-     * @param string $terms
-     * @param array $params
-     * @return bool
-     */
-    protected function delete(string $terms, array $params = []): bool
-    {
-        try {
-            $query = "DELETE FROM {$this->table} WHERE {$terms}";
-            $statement = Connect::instance($this->database)->prepare($query);
-
-            if ($params) {
-                $statement->execute($params);
-                return true;
-            }
-
-            $statement->execute();
-
-            return true;
-        } catch (PDOException $e) {
-            $this->fail = $e;
-            return false;
-        }
-    }
-
-    /**
-     * @param string $terms
-     * @param array $params
-     * @return void
-     */
-    protected function updateData(string $terms, array $params = [])
-    {
-        $this->data = $this->where($terms, $params)->fetch()->data();
-        $this->behaviorToSave = 'update';
-    }
-
-    /**
-     * @param array $data
-     * @return array
-     */
-    private function filter(array $data): array
-    {
-        $filter = [];
-
-        foreach ($data as $column => $value) {
-            $filter[$column] = is_null($value) ? null : filter_var($value, FILTER_DEFAULT);
-        }
-
-        return $filter;
+        return $this->delete("`{$primaryKey}` = :{$primaryKey}", [$primaryKey => $this->data->$primaryKey]);
     }
 
     /**
      * @return bool
      */
-    private function required(): bool
+    protected function isCreate(): bool
+    {
+        return $this->behaviorToSave == 'create';
+    }
+
+    /**
+     * @return bool
+     */
+    protected function isUpdate(): bool
+    {
+        return $this->behaviorToSave == 'update';
+    }
+
+    /**
+     * @return bool
+     */
+    protected function required(): bool
     {
         $data = (array) $this->data;
 
-        foreach ($this->required as $column) {
-            if (!isset($data[$column]) || $data[$column] === '' || $data[$column] === null) {
+        foreach ($this->required as $field) {
+            if (!isset($data[$field]) || (!$data[$field] && !is_int($data[$field]))) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /**
+     * @return array|null
+     */
+    protected function safe()
+    {
+        $safe = (array) $this->data;
+        unset($safe[$this->primaryKey]);
+        return $safe;
     }
 }
