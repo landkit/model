@@ -26,9 +26,9 @@ class Model
     protected $primaryKey = 'id';
 
     /**
-     * @var array|null
+     * @var array
      */
-    protected $required = null;
+    protected $required = [];
 
     /**
      * @var bool
